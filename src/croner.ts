@@ -31,6 +31,7 @@
 import { CronDate } from "./date.ts";
 import { CronPattern } from "./pattern.ts";
 import { type CronOptions, CronOptionsHandler } from "./options.ts";
+import { type CronTraceOptions, CronTracer, type CronTraceResult } from "./trace.ts";
 import { isCronCallback, isFunction, unrefTimer } from "./utils.ts";
 
 /**
@@ -232,6 +233,37 @@ class Cron<T = undefined> {
     if (!next) return null;
 
     return this.applyDayOffset(next.getDate(false));
+  }
+
+  /**
+   * Find next runtime and trace how the engine got there, without side effects.
+   *
+   * Uses the exact same calculation path as `nextRun` (the tracer is only an
+   * observer threaded through increment/recurse/findNext), so `result.nextRun`
+   * is identical to the value `nextRun` returns for the same input. The trace
+   * does not read the current time: given the same input Date (or date string)
+   * and timezone, the result can be replayed deterministically.
+   *
+   * The returned steps are bounded by `maxSteps` (defaults to
+   * `CRON_TRACE_DEFAULT_MAX_STEPS`). A search that produces more steps keeps
+   * running to completion, but only sets `truncated` and keeps counting in
+   * `totalSteps` instead of growing the steps array further.
+   *
+   * @param prev - Optional date to start the search from
+   * @param traceOptions - Optional trace configuration, e.g. `{ maxSteps: 100 }`
+   * @returns The next run Date (same as nextRun), the matched local candidate,
+   *          timezone classification, and the bounded decision steps
+   */
+  public nextRunTrace(
+    prev?: CronDate<T> | Date | string | null,
+    traceOptions?: CronTraceOptions,
+  ): CronTraceResult {
+    const tracer = new CronTracer(this.getTz(), traceOptions);
+
+    const matched = this._next(prev, tracer);
+    const nextRun = matched ? this.applyDayOffset(matched.getDate(false)) : null;
+
+    return tracer.finish(matched, nextRun);
   }
 
   /**
@@ -599,7 +631,10 @@ class Cron<T = undefined> {
   /**
    * Internal version of next. Cron needs millseconds internally, hence _next.
    */
-  private _next(previousRun?: CronDate<T> | Date | string | null) {
+  private _next(
+    previousRun?: CronDate<T> | Date | string | null,
+    tracer?: CronTracer,
+  ) {
     let hasPreviousRun = (previousRun || this._states.currentRun) ? true : false;
 
     // If no previous run, and startAt and interval is set, calculate when the last run should have been
@@ -630,6 +665,7 @@ class Cron<T = undefined> {
         this._states.pattern,
         this.options,
         hasPreviousRun, // hasPreviousRun is used to allow
+        tracer,
       );
     }
 
@@ -732,3 +768,13 @@ class Cron<T = undefined> {
 }
 
 export { Cron, CronDate, type CronOptions, CronPattern, scheduledJobs };
+export type {
+  CronTraceField,
+  CronTraceLocalTime,
+  CronTraceOptions,
+  CronTraceReason,
+  CronTraceResult,
+  CronTraceStep,
+  CronTraceTimezone,
+} from "./trace.ts";
+export { CRON_TRACE_ABSOLUTE_MAX_STEPS, CRON_TRACE_DEFAULT_MAX_STEPS } from "./trace.ts";

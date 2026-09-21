@@ -7,6 +7,7 @@ import {
   LAST_OCCURRENCE,
   OCCURRENCE_BITMASKS,
 } from "./pattern.ts";
+import type { CronTracer } from "./trace.ts";
 
 /**
  * Constant defining the minimum number of days per month where index 0 = January etc.
@@ -363,8 +364,9 @@ class CronDate<T = undefined> {
     target: RecursionTarget,
     pattern: CronPattern,
     offset: number,
+    tracer?: CronTracer,
   ): number {
-    return this._findMatch(options, target, pattern, offset, 1);
+    return this._findMatch(options, target, pattern, offset, 1, tracer);
   }
 
   /**
@@ -377,6 +379,7 @@ class CronDate<T = undefined> {
    * @param pattern Pattern to use
    * @param offset Offset to use
    * @param direction 1 for forward (next), -1 for backward (previous)
+   * @param tracer Optional trace collector, only observation, never alters the result
    * @returns Status code: 1 = same value matches, 2 = value changed, 3 = no match found
    *
    * @private
@@ -387,6 +390,7 @@ class CronDate<T = undefined> {
     pattern: CronPattern,
     offset: number,
     direction: 1 | -1,
+    tracer?: CronTracer,
   ): number {
     const originalTarget = this[target];
 
@@ -453,6 +457,10 @@ class CronDate<T = undefined> {
 
       // Special case for day of week
       if (target === "day" && !pattern.starDOW) {
+        // Remember whether day-of-month matched on its own, so the tracer can
+        // tell whether a resulting match was driven solely by day-of-week
+        const domMatch = match;
+
         let dowMatch = pattern.dayOfWeek[(fDomWeekDay! + ((i - offset) - 1)) % 7];
 
         // Extra check for nth weekday of month
@@ -473,6 +481,18 @@ class CronDate<T = undefined> {
           match = match || dowMatch;
         } else {
           match = match && dowMatch;
+        }
+
+        // If the day advanced to a value selected solely by the day-of-week
+        // constraint (an explicit day-of-month did not match, or day-of-month
+        // is a wildcard), let the tracer attribute the push to "dayOfWeek"
+        // instead of "day". A day that already matched on its own (res === 1)
+        // does not push the candidate and must not set the flag.
+        if (
+          tracer && (i - offset) !== originalTarget && match && dowMatch &&
+          (!domMatch || pattern.starDOM)
+        ) {
+          tracer.noteDayOfWeekDriven();
         }
       }
 
@@ -514,6 +534,7 @@ class CronDate<T = undefined> {
     pattern: CronPattern,
     options: CronOptions<T>,
     doing: number,
+    tracer?: CronTracer,
   ): CronDate<T> | null {
     // OCPS 1.2: Check if current year matches the year pattern at the start
     // Only check when year constraints exist and we're at month level
@@ -524,6 +545,9 @@ class CronDate<T = undefined> {
         this.year < pattern.year.length &&
         pattern.year[this.year] === 0
       ) {
+        // Trace: capture state before the year jump
+        const beforeYearJump = tracer ? tracer.snapshot(this) : undefined;
+
         // Find next matching year
         let foundYear = -1;
         for (let y = this.year + 1; y < pattern.year.length && y < 10000; y++) {
@@ -545,6 +569,8 @@ class CronDate<T = undefined> {
         this.minute = 0;
         this.second = 0;
         this.ms = 0;
+
+        tracer?.record("year", "advance", beforeYearJump!, this);
       }
 
       // Check if we've gone out of bounds
@@ -553,8 +579,17 @@ class CronDate<T = undefined> {
       }
     }
 
+    // Capture state before this field is searched, so the tracer can record the push
+    const beforeField = tracer ? tracer.snapshot(this) : undefined;
+
     // Find next month (or whichever part we're at)
-    const res = this.findNext(options, RecursionSteps[doing][0], pattern, RecursionSteps[doing][2]);
+    const res = this.findNext(
+      options,
+      RecursionSteps[doing][0],
+      pattern,
+      RecursionSteps[doing][2],
+      tracer,
+    );
 
     // Month (or whichever part we're at) changed
     if (res > 1) {
@@ -570,6 +605,9 @@ class CronDate<T = undefined> {
         this[RecursionSteps[doing][1]]++;
         this[RecursionSteps[doing][0]] = -RecursionSteps[doing][2];
         this.apply();
+
+        // The parent field rolled over because the current field had no match left
+        tracer?.record(RecursionSteps[doing][1], "rollover", beforeField!, this);
 
         // OCPS 1.2: If we just incremented the year and have year constraints, check if it matches
         if (doing === 0 && !pattern.starYear) {
@@ -590,9 +628,14 @@ class CronDate<T = undefined> {
         }
 
         // Restart
-        return this.recurse(pattern, options, 0);
-      } else if (this.apply()) {
-        return this.recurse(pattern, options, doing - 1);
+        return this.recurse(pattern, options, 0, tracer);
+      } else {
+        // This field advanced to its next matching value
+        const normalized = this.apply();
+        tracer?.record(RecursionSteps[doing][0], "advance", beforeField!, this);
+        if (normalized) {
+          return this.recurse(pattern, options, doing - 1, tracer);
+        }
       }
     }
 
@@ -610,7 +653,7 @@ class CronDate<T = undefined> {
 
       // ... oh, go to next part then
     } else {
-      return this.recurse(pattern, options, doing);
+      return this.recurse(pattern, options, doing, tracer);
     }
   }
 
@@ -620,13 +663,18 @@ class CronDate<T = undefined> {
    * @param pattern The pattern used to increment the current date.
    * @param options Cron options used for incrementing.
    * @param hasPreviousRun True if there was a previous run, false otherwise. This is used to determine whether to apply the minimum interval.
+   * @param tracer Optional trace collector, records each field push without affecting the result
    * @returns This CronDate instance for chaining, or null if incrementing was not possible (e.g., reached year 3000 limit).
    */
   public increment(
     pattern: CronPattern,
     options: CronOptions<T>,
     hasPreviousRun: boolean,
+    tracer?: CronTracer,
   ): CronDate<T> | null {
+    // Capture state before the initial tick for the trace
+    const beforeTick = tracer ? tracer.snapshot(this) : undefined;
+
     // Move to next second, or increment according to minimum interval indicated by option `interval: x`
     // Do not increment a full interval if this is the very first run
     this.second += (options.interval !== undefined && options.interval > 1 && hasPreviousRun)
@@ -639,8 +687,11 @@ class CronDate<T = undefined> {
     // Make sure seconds has not gotten out of bounds
     this.apply();
 
+    // Trace: the initial second tick that starts every search
+    tracer?.record("second", "tick", beforeTick!, this);
+
     // Recursively change each part (y, m, d ...) until next match is found, return null on failure
-    return this.recurse(pattern, options, 0);
+    return this.recurse(pattern, options, 0, tracer);
   }
 
   /**

@@ -51,6 +51,56 @@ job.getPattern();     // Returns the original cron pattern string, or undefined 
 job.getOnce();     // Returns the original run-once date (Date or null)
 ```
 
+## Tracing the next run
+
+`nextRun()` tells you *when* the next run happens, but not *why*: for example which field skipped a candidate, or whether a candidate landed inside a DST gap. Use `nextRunTrace()` to get the next run together with the bounded list of decision steps the engine took to get there.
+
+```ts
+const trace = job.nextRunTrace(
+  startFromDate,    // optional, same input types as nextRun()
+  { maxSteps: 100 }, // optional, default 1000, hard cap 100000
+);
+```
+
+The result is plain structured data:
+
+```ts
+{
+  nextRun: Date,          // identical to nextRun() for the same input (dayOffset applied)
+  matched: {              // matched local candidate, before any dayOffset
+    year, month, day,     // month/day are 1-based
+    hour, minute, second,
+  },
+  timezone: "normal",     // "normal" | "gap" | "overlap"
+                          //   gap: local time does not exist (spring forward)
+                          //   overlap: local time exists twice (fall back)
+  steps: [
+    {
+      sequence: 1,
+      field: "hour",      // year|month|day|dayOfWeek|hour|minute|second
+      reason: "advance",  // tick|advance|rollover
+      from: { /* local components before the step */ },
+      to:   { /* local components after the step */ },
+      timezone: "normal", // conversion classification of the `to` candidate
+    },
+  ],
+  truncated: false,       // true when more steps occurred than maxSteps
+  totalSteps: 4,          // full step count, even when the steps array is capped
+  maxSteps: 1000,
+}
+```
+
+Semantics:
+
+- **Shared calculation path.** The tracer is an observer threaded through the exact same `increment` → `recurse` → `findNext` path that `nextRun` uses. It never duplicates the matching logic, so `trace.nextRun` is always the value `nextRun()` returns for the same input.
+- **Field attribution.** `tick` is the initial one-second (or `interval`) increment. `advance` means the field moved to its next matching value. `rollover` means the field below ran out of matches and this field (e.g. `day` when the hour range is exhausted) was incremented. A day-level advance driven solely by the day-of-week constraint in legacy OR mode is reported as `dayOfWeek`.
+- **DST classification.** Each step and the final match report `normal`, `gap` (missing local time during spring forward) or `overlap` (repeated local time during fall back), including half-hour transitions such as `Australia/Lord_Howe`. The produced instant stays the one `nextRun()` returns; the trace only describes the conversion.
+- **Deterministic replay.** Tracing never reads the current time. When you pass a fixed `Date` (or date string) and timezone, the result is reproducible. Decisions are derived from structured numeric components, so different display forms of the same instant (Date, epoch-derived Date, local ISO string, or the two occurrences of an overlap) produce identical field decisions.
+- **Bounded memory.** The search always runs to completion, but `steps` never grows beyond `maxSteps` (default `CRON_TRACE_DEFAULT_MAX_STEPS`, capped at `CRON_TRACE_ABSOLUTE_MAX_STEPS`); beyond the cap, `truncated` is set and only `totalSteps` keeps counting.
+- **Side effects.** `nextRunTrace()` does not schedule, start timers, update job state, or consume runs. `dayOffset` is reflected in `nextRun` only; `matched` and the steps describe the unshifted pattern match.
+
+Complexity: the trace is O(s) time where s is the number of field decisions the engine makes (identical to `nextRun` plus O(1) observer work per step), with IANA timezone steps additionally performing a constant number of timezone lookups. Memory is O(min(s, maxSteps)). Calling `nextRun()` without tracing has unchanged behavior and no tracing allocations.
+
 ## Control Functions
 
 Control the job using the following methods:

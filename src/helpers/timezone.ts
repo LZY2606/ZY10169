@@ -181,6 +181,66 @@ export function fromTZ(tp: TimePoint, throwOnInvalid?: boolean): Date {
 }
 
 /**
+ * Classification of a local-to-UTC timezone conversion for a single local time point.
+ *
+ * - "normal": The local time exists exactly once in the timezone.
+ * - "gap": The local time does not exist (e.g. inside a spring-forward DST gap).
+ * - "overlap": The local time exists more than once (e.g. inside a fall-back DST overlap).
+ */
+export type TzConversionKind = "normal" | "gap" | "overlap";
+
+/**
+ * Shifts (in milliseconds) probed when looking for a second occurrence of a local time.
+ * Covers the common one-hour DST transitions as well as half-hour transitions
+ * (e.g. Australia/Lord_Howe).
+ */
+const OVERLAP_PROBE_SHIFTS = [1800000, 3600000];
+
+/**
+ * Classify how a local time point converts to UTC in its timezone, without
+ * performing the conversion. Uses the same iterative guessing strategy as `fromTZ`,
+ * so the classification is consistent with the instant `fromTZ` would produce.
+ *
+ * @param tp - TimePoint with specified timezone
+ * @returns "normal" | "gap" | "overlap"
+ */
+export function classifyTZ(tp: TimePoint): TzConversionKind {
+  // Construct a Date object with UTC components matching the target local time
+  const inDate = new Date(timePointToMs(tp));
+
+  // See what this UTC time looks like when formatted in the target timezone
+  const check0 = toTZ(inDate, tp.tz!);
+
+  // First guess, adjusted by the difference between target and actual local time
+  const targetMs = timePointToMs(tp);
+  const dateGuess = new Date(inDate.getTime() + (targetMs - timePointToMs(check0)));
+  const check1 = toTZ(dateGuess, tp.tz!);
+
+  if (timePointsMatch(check1, tp)) {
+    // The local time exists. Check if another instant nearby maps to the same
+    // local time, which means we are inside a DST overlap (fall back).
+    for (const shift of OVERLAP_PROBE_SHIFTS) {
+      if (timePointsMatch(toTZ(new Date(dateGuess.getTime() - shift), tp.tz!), tp)) {
+        return "overlap";
+      }
+      if (timePointsMatch(toTZ(new Date(dateGuess.getTime() + shift), tp.tz!), tp)) {
+        return "overlap";
+      }
+    }
+    return "normal";
+  }
+
+  // Second iteration, same refinement as fromTZ
+  const dateGuess2 = new Date(dateGuess.getTime() + targetMs - timePointToMs(check1));
+  if (timePointsMatch(toTZ(dateGuess2, tp.tz!), tp)) {
+    return "normal";
+  }
+
+  // Neither iteration lands on the target local time: it does not exist (spring forward)
+  return "gap";
+}
+
+/**
  * Converts a date object to a TimePoint in the specified timezone
  *
  * @param d - Date to convert

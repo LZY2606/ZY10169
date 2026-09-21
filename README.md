@@ -114,6 +114,7 @@ The job will be sceduled to run at next matching time unless you supply option `
 ```javascript
 job.nextRun( /*optional*/ startFromDate );	// Get a Date object representing the next run.
 job.nextRuns(10, /*optional*/ startFromDate ); // Get an array of Dates, containing the next n runs.
+job.nextRunTrace( /*optional*/ startFromDate, /*optional*/ { maxSteps } ); // Get the next run plus bounded tracing steps (which field pushed the candidate, and normal/gap/overlap DST conversion).
 job.previousRuns(10, /*optional*/ referenceDate ); // Get an array of Dates, containing previous n scheduled runs.
 job.msToNext( /*optional*/ startFromDate ); // Get the milliseconds left until the next execution.
 job.currentRun(); 		// Get a Date object showing when the current (or last) run was started.
