@@ -1,6 +1,7 @@
 import { createTimePoint, fromTZ, fromTZISO, toTZ } from "./helpers/timezone.ts";
 
 import type { CronOptions as CronOptions } from "./options.ts";
+import { type CronTraceField, type CronTraceSink, formatTraceCandidate } from "./trace.ts";
 import {
   ANY_OCCURRENCE,
   type CronPattern,
@@ -356,6 +357,46 @@ class CronDate<T = undefined> {
   }
 
   /**
+   * Record a trace step, if a trace sink is attached. Month values are
+   * reported 1-based in traces, while they are 0-based internally.
+   */
+  private traceRecord(
+    trace: CronTraceSink | undefined,
+    field: CronTraceField,
+    action: "seek" | "advance" | "carry" | "reset",
+    from: number,
+    to: number,
+  ): void {
+    if (!trace) return;
+    trace.record({
+      field,
+      action,
+      from: field === "month" ? from + 1 : from,
+      to: field === "month" ? to + 1 : to,
+      candidate: formatTraceCandidate(
+        this.year,
+        this.month,
+        this.day,
+        this.hour,
+        this.minute,
+        this.second,
+      ),
+    });
+  }
+
+  /**
+   * Map a recursion target to the trace field that drives it. When
+   * day-of-month is a wildcard and day-of-week is restricted, the weekday
+   * pattern is what pushes the candidate forward.
+   */
+  private traceFieldFor(target: RecursionTarget, pattern: CronPattern): CronTraceField {
+    if (target === "day" && pattern.starDOM && !pattern.starDOW) {
+      return "weekday";
+    }
+    return target;
+  }
+
+  /**
    * Find next match of current part
    */
   private findNext(
@@ -514,6 +555,7 @@ class CronDate<T = undefined> {
     pattern: CronPattern,
     options: CronOptions<T>,
     doing: number,
+    trace?: CronTraceSink,
   ): CronDate<T> | null {
     // OCPS 1.2: Check if current year matches the year pattern at the start
     // Only check when year constraints exist and we're at month level
@@ -538,6 +580,7 @@ class CronDate<T = undefined> {
         }
 
         // Jump to the found year and reset to start of year
+        const yearBefore = this.year;
         this.year = foundYear;
         this.month = 0;
         this.day = 1;
@@ -545,6 +588,7 @@ class CronDate<T = undefined> {
         this.minute = 0;
         this.second = 0;
         this.ms = 0;
+        this.traceRecord(trace, "year", "advance", yearBefore, this.year);
       }
 
       // Check if we've gone out of bounds
@@ -554,26 +598,54 @@ class CronDate<T = undefined> {
     }
 
     // Find next month (or whichever part we're at)
+    const targetBefore = this[RecursionSteps[doing][0]];
     const res = this.findNext(options, RecursionSteps[doing][0], pattern, RecursionSteps[doing][2]);
 
     // Month (or whichever part we're at) changed
     if (res > 1) {
+      if (res === 2) {
+        this.traceRecord(
+          trace,
+          this.traceFieldFor(RecursionSteps[doing][0], pattern),
+          "advance",
+          targetBefore,
+          this[RecursionSteps[doing][0]],
+        );
+      }
       // Flag following levels for reset
       let resetLevel = doing + 1;
       while (resetLevel < RecursionSteps.length) {
-        this[RecursionSteps[resetLevel][0]] = -RecursionSteps[resetLevel][2];
+        const resetTarget = RecursionSteps[resetLevel][0];
+        const resetBefore = this[resetTarget];
+        this[resetTarget] = -RecursionSteps[resetLevel][2];
+        this.traceRecord(
+          trace,
+          this.traceFieldFor(resetTarget, pattern),
+          "reset",
+          resetBefore,
+          this[resetTarget],
+        );
         resetLevel++;
       }
       // Parent changed
       if (res === 3) {
         // Do increment parent, and reset current level
+        const parentBefore = this[RecursionSteps[doing][1]];
         this[RecursionSteps[doing][1]]++;
         this[RecursionSteps[doing][0]] = -RecursionSteps[doing][2];
         this.apply();
+        this.traceRecord(
+          trace,
+          RecursionSteps[doing][1] as CronTraceField,
+          "carry",
+          parentBefore,
+          this[RecursionSteps[doing][1]],
+        );
 
         // OCPS 1.2: If we just incremented the year and have year constraints, check if it matches
         if (doing === 0 && !pattern.starYear) {
           // Keep incrementing year until we find a matching one
+          const yearBefore = this.year;
           while (
             this.year >= 0 &&
             this.year < pattern.year.length &&
@@ -581,6 +653,9 @@ class CronDate<T = undefined> {
             this.year < 10000
           ) {
             this.year++;
+          }
+          if (this.year !== yearBefore) {
+            this.traceRecord(trace, "year", "advance", yearBefore, this.year);
           }
 
           // Check if we've gone out of bounds
@@ -590,9 +665,9 @@ class CronDate<T = undefined> {
         }
 
         // Restart
-        return this.recurse(pattern, options, 0);
+        return this.recurse(pattern, options, 0, trace);
       } else if (this.apply()) {
-        return this.recurse(pattern, options, doing - 1);
+        return this.recurse(pattern, options, doing - 1, trace);
       }
     }
 
@@ -610,7 +685,7 @@ class CronDate<T = undefined> {
 
       // ... oh, go to next part then
     } else {
-      return this.recurse(pattern, options, doing);
+      return this.recurse(pattern, options, doing, trace);
     }
   }
 
@@ -626,9 +701,11 @@ class CronDate<T = undefined> {
     pattern: CronPattern,
     options: CronOptions<T>,
     hasPreviousRun: boolean,
+    trace?: CronTraceSink,
   ): CronDate<T> | null {
     // Move to next second, or increment according to minimum interval indicated by option `interval: x`
     // Do not increment a full interval if this is the very first run
+    const secondBefore = this.second;
     this.second += (options.interval !== undefined && options.interval > 1 && hasPreviousRun)
       ? options.interval
       : 1;
@@ -639,8 +716,10 @@ class CronDate<T = undefined> {
     // Make sure seconds has not gotten out of bounds
     this.apply();
 
+    this.traceRecord(trace, "second", "seek", secondBefore, this.second);
+
     // Recursively change each part (y, m, d ...) until next match is found, return null on failure
-    return this.recurse(pattern, options, 0);
+    return this.recurse(pattern, options, 0, trace);
   }
 
   /**

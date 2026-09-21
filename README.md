@@ -115,6 +115,7 @@ The job will be sceduled to run at next matching time unless you supply option `
 job.nextRun( /*optional*/ startFromDate );	// Get a Date object representing the next run.
 job.nextRuns(10, /*optional*/ startFromDate ); // Get an array of Dates, containing the next n runs.
 job.previousRuns(10, /*optional*/ referenceDate ); // Get an array of Dates, containing previous n scheduled runs.
+job.nextRunTrace( /*optional*/ startFromDate, /*optional*/ { maxSteps: 1024 } ); // Trace the next run computation: returns the same Date as nextRun() plus a bounded list of decision steps.
 job.msToNext( /*optional*/ startFromDate ); // Get the milliseconds left until the next execution.
 job.currentRun(); 		// Get a Date object showing when the current (or last) run was started.
 job.previousRun( ); 		// Get a Date object showing when the previous job was started.
@@ -232,6 +233,23 @@ Croner uses [Vixie Cron](https://en.wikipedia.org/wiki/Cron#CRON_expression) bas
 | \@weekly | Run once a week, i.e.  "0 0 * * 0". |
 | \@daily / \@midnight | Run once a day, i.e.   "0 0 * * *". |
 | \@hourly | Run once an hour, i.e. "0 * * * *". |
+
+## Tracing the next run
+
+`nextRunTrace(startFromDate?, options?)` explains *why* a local time is the next run. It executes the exact same code path as `nextRun()` (so the returned `run` is always identical, including `dayOffset` handling), while recording a bounded list of decision steps. It is side-effect free and fully deterministic for a fixed input date and timezone - it never reads the system clock by itself.
+
+```javascript
+const job = new Cron("0 30 2 * * *", { timezone: "America/New_York" });
+const trace = job.nextRunTrace(new Date("2024-03-09T12:00:00Z"));
+
+console.log(trace.run);              // 2024-03-10T07:30:00.000Z (same as nextRun)
+console.log(trace.timezone.status);  // "missing" - 02:30 does not exist on spring-forward day
+console.log(trace.steps[0]);         // { field: "second", action: "seek", from: 0, to: 1, candidate: "2024-03-09T07:00:01" }
+```
+
+Each step names the field that pushed the candidate forward (`year`, `month`, `day`, `weekday`, `hour`, `minute` or `second` - `weekday` is reported when day-of-week alone decides the day), the kind of decision (`seek`, `advance`, `carry`, `reset`), and the candidate local time after the step. The `timezone` diagnostics classify the matched local time as `normal`, `missing` (spring-forward gap, including half-hour DST zones) or `repeated` (fall-back overlap).
+
+The number of steps is bounded by `maxSteps` (default `1024`); when the limit is exceeded, recording stops, `truncated` is set to `true`, and the search itself continues unaffected - memory usage stays bounded regardless of the pattern. Tracing adds no cost to regular `nextRun()`/`nextRuns()` calls. See [the tracing documentation](https://croner.56k.guru/usage/tracing/) for full semantics, complexity and compatibility notes.
 
 ## Why another JavaScript cron implementation
 

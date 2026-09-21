@@ -31,6 +31,14 @@
 import { CronDate } from "./date.ts";
 import { CronPattern } from "./pattern.ts";
 import { type CronOptions, CronOptionsHandler } from "./options.ts";
+import { classifyTimePoint, createTimePoint } from "./helpers/timezone.ts";
+import {
+  type CronRunTrace,
+  type CronTraceOptions,
+  CronTraceSink,
+  formatTraceCandidate,
+  resolveMaxSteps,
+} from "./trace.ts";
 import { isCronCallback, isFunction, unrefTimer } from "./utils.ts";
 
 /**
@@ -247,6 +255,75 @@ class Cron<T = undefined> {
     }
     const startingDate = previous || this._states.currentRun || undefined;
     return this._enumerateRuns(n, startingDate, "next");
+  }
+
+  /**
+   * Trace the computation of the next run, without any side effects.
+   *
+   * Runs the exact same code path as `nextRun()`, while recording a bounded
+   * list of decision steps explaining how the candidate local time was
+   * advanced (which field pushed it forward, and how the final local time
+   * converts through the job's timezone - normal, missing or repeated).
+   *
+   * The trace is fully determined by the supplied date and the job's
+   * pattern/options; pass an explicit `prev` date to make it replayable.
+   *
+   * @param prev - Optional. Date to start from. Can be a CronDate, Date object, or a string representing a date.
+   * @param traceOptions - Optional. Trace options, e.g. `maxSteps` to bound the number of recorded steps.
+   * @returns A trace containing the next run time (identical to what `nextRun()` would return) and the decision steps.
+   */
+  public nextRunTrace(
+    prev?: CronDate<T> | Date | string | null,
+    traceOptions?: CronTraceOptions,
+  ): CronRunTrace {
+    const maxSteps = resolveMaxSteps(traceOptions);
+    const sink = new CronTraceSink(maxSteps);
+
+    const next = this._next(prev, sink);
+
+    const trace: CronRunTrace = {
+      run: null,
+      steps: sink.steps,
+      truncated: sink.truncated,
+      maxSteps,
+    };
+
+    if (next) {
+      // Classify the timezone conversion of the matched local time (before dayOffset)
+      const tz = this.getTz();
+      if (typeof tz === "string") {
+        trace.timezone = {
+          timezone: tz,
+          localTime: formatTraceCandidate(
+            next.year,
+            next.month,
+            next.day,
+            next.hour,
+            next.minute,
+            next.second,
+          ),
+          status: classifyTimePoint(
+            createTimePoint(
+              next.year,
+              next.month + 1,
+              next.day,
+              next.hour,
+              next.minute,
+              next.second,
+              tz,
+            ),
+          ),
+        };
+      }
+
+      if (this.options.dayOffset !== undefined && this.options.dayOffset !== 0) {
+        trace.dayOffset = this.options.dayOffset;
+      }
+
+      trace.run = this.applyDayOffset(next.getDate(false));
+    }
+
+    return trace;
   }
 
   /**
@@ -599,7 +676,7 @@ class Cron<T = undefined> {
   /**
    * Internal version of next. Cron needs millseconds internally, hence _next.
    */
-  private _next(previousRun?: CronDate<T> | Date | string | null) {
+  private _next(previousRun?: CronDate<T> | Date | string | null, trace?: CronTraceSink) {
     let hasPreviousRun = (previousRun || this._states.currentRun) ? true : false;
 
     // If no previous run, and startAt and interval is set, calculate when the last run should have been
@@ -630,6 +707,7 @@ class Cron<T = undefined> {
         this._states.pattern,
         this.options,
         hasPreviousRun, // hasPreviousRun is used to allow
+        trace,
       );
     }
 
@@ -732,3 +810,12 @@ class Cron<T = undefined> {
 }
 
 export { Cron, CronDate, type CronOptions, CronPattern, scheduledJobs };
+export type {
+  CronRunTrace,
+  CronTraceAction,
+  CronTraceField,
+  CronTraceOptions,
+  CronTraceStep,
+  CronTraceTimezone,
+  CronTraceTimezoneStatus,
+} from "./trace.ts";

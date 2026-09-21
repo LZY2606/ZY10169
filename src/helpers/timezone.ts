@@ -286,3 +286,43 @@ export function createTimePoint(
 ): TimePoint {
   return { y, m, d, h, i, s, tz };
 }
+
+/**
+ * Classify how a local time point converts through its timezone.
+ *
+ * Uses the same conversion primitives (`toTZ`, `timePointToMs`,
+ * `timePointsMatch`) as `fromTZ`, so the classification always reflects the
+ * actual conversion behaviour:
+ *
+ * - `normal`   - the local time exists exactly once
+ * - `missing`  - the local time never occurs (spring-forward gap)
+ * - `repeated` - the local time occurs twice (fall-back overlap)
+ *
+ * Both 30-minute and 60-minute transitions are detected, covering
+ * half-hour DST zones such as Australia/Lord_Howe.
+ *
+ * @param tp - TimePoint with a named IANA timezone
+ * @returns Classification of the local time
+ */
+export function classifyTimePoint(tp: TimePoint): "normal" | "missing" | "repeated" {
+  // Resolve the local time the same way fromTZ does, then convert the
+  // result back. If the round trip does not reproduce the input, the local
+  // time never occurs.
+  const resolved = fromTZ(tp, false);
+  const roundTrip = toTZ(resolved, tp.tz!);
+  if (!timePointsMatch(roundTrip, tp)) {
+    return "missing";
+  }
+
+  // The local time exists. Check whether any nearby instant (30 or 60
+  // minutes away, in either direction) maps to the same local time - if so,
+  // the local time occurs more than once.
+  for (const shiftMs of [1800000, 3600000, -1800000, -3600000]) {
+    const alternate = toTZ(new Date(resolved.getTime() + shiftMs), tp.tz!);
+    if (timePointsMatch(alternate, tp)) {
+      return "repeated";
+    }
+  }
+
+  return "normal";
+}

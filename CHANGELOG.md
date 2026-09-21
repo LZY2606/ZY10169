@@ -5,6 +5,11 @@ All notable changes to Croner will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `nextRunTrace()` method for side-effect free tracing of the next run computation. Returns the same run time as `nextRun()` together with a bounded list of decision steps (which of year/month/day/weekday/hour/minute/second pushed the candidate forward) and timezone conversion diagnostics (`normal`, `missing` or `repeated`, including half-hour DST transitions). Step recording is bounded by `maxSteps` (default 1024) and flagged with `truncated` when exceeded.
+
 ## [10.0.1] - 2026-02-01
 
 ### Fixed
